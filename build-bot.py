@@ -7,15 +7,16 @@ import glob
 import argparse
 import requests
 import html
+import signal
 from datetime import timedelta
 
 # Config
 if os.path.exists("config.env"):
-    with open("config.env") as f:
-        for file_line in f:
-            if "=" in file_line and not file_line.strip().startswith("#"):
-                k, v = file_line.strip().split("=", 1)
-                os.environ[k] = v.strip('"')
+    with open("config.env", "r") as f:
+        for line_content in f:
+            if "=" in line_content and not line_content.strip().startswith("#"):
+                k, v = line_content.strip().split("=", 1)
+                os.environ[k] = v.strip('"').strip("'")
 
 BOT_TOKEN = os.environ.get("CONFIG_BOT_TOKEN")
 CHAT_ID = os.environ.get("CONFIG_CHATID")
@@ -25,11 +26,15 @@ if not BOT_TOKEN or not CHAT_ID:
     sys.exit(1)
 
 ERROR_CHAT_ID = os.environ.get("CONFIG_ERROR_CHATID", CHAT_ID)
-DEVICE = os.environ.get("CONFIG_DEVICE") or input("Enter device codename: ")
-TARGET = os.environ.get("CONFIG_TARGET") or input("Enter build target: ")
-BUILD_VARIANT = os.environ.get("CONFIG_BUILD_TYPE") or input("Enter build type: ")
+DEVICE = os.environ.get("CONFIG_DEVICE")
+TARGET = os.environ.get("CONFIG_BUILD_TARGET")
+BUILD_VARIANT = os.environ.get("CONFIG_BUILD_TYPE")
 PD_API = os.environ.get("CONFIG_PDUP_API")
 USE_GOFILE = os.environ.get("CONFIG_GOFILE") == "true"
+
+if not all([DEVICE, TARGET, BUILD_VARIANT]):
+    print("ERROR: Missing build configuration (DEVICE, TARGET, or TYPE).")
+    sys.exit(1)
 
 cpu_cores = os.cpu_count()
 jobs_env = os.environ.get("CONFIG_JOBS")
@@ -38,6 +43,24 @@ SYNC_JOBS = jobs_env if jobs_env else (str(cpu_cores) if cpu_cores else "4")
 
 current_folder = os.getcwd().split("/")[-1]
 ROM_NAME = current_folder if current_folder else "Unknown ROM"
+
+# Global process handle for graceful exit
+BUILD_PROCESS = None
+
+
+def signal_handler(sig, frame):
+    global BUILD_PROCESS
+    print("\n[BOT] Interruption detected. Exiting...")
+    if BUILD_PROCESS and BUILD_PROCESS.poll() is None:
+        print("[BOT] Killing build process...")
+        BUILD_PROCESS.terminate()
+        time.sleep(1)
+        if BUILD_PROCESS.poll() is None:
+            BUILD_PROCESS.kill()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
 
 
 # Helpers
@@ -61,20 +84,22 @@ def get_build_vars():
                 d[k] = v.strip()
         return d
     except Exception as e:
-        print(f"Error fetching vars: {e}")
+        print(f"Warning: Could not fetch vars: {e}")
         return {"VER": "N/A", "BID": "N/A", "TYPE": BUILD_VARIANT}
 
 
-def tg_req(method, data, files=None):
+def tg_req(method, data, files=None, retries=3):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-    try:
-        r = requests.post(url, data=data, files=files, timeout=20)
-        if r.status_code != 200:
+    for attempt in range(retries):
+        try:
+            r = requests.post(url, data=data, files=files, timeout=30)
+            if r.status_code == 200:
+                return r.json()
             print(f"[Telegram Error {r.status_code}] {r.text}")
-        return r.json()
-    except Exception as e:
-        print(f"[Telegram Connection Error] {e}")
-        return {}
+        except Exception as e:
+            print(f"[Telegram Retry {attempt+1}/{retries}] {e}")
+            time.sleep(2)
+    return {}
 
 
 def send_msg(text, chat=CHAT_ID):
@@ -131,36 +156,44 @@ def format_msg(icon, title, details, footer=""):
 
 
 def upload_pd(path):
+    print(f"Uploading to PixelDrain: {path}")
     try:
         r = requests.put(
             "https://pixeldrain.com/api/file/",
             data=open(path, "rb"),
             auth=("", PD_API) if PD_API else None,
+            timeout=300,
         )
-        return (
-            f"https://pixeldrain.com/u/{r.json().get('id')}"
-            if r.status_code == 200
-            else "Upload failed"
-        )
-    except:
-        return "Upload failed"
+        if r.status_code == 200:
+            return f"https://pixeldrain.com/u/{r.json().get('id')}"
+        return None
+    except Exception as e:
+        print(f"PixelDrain Upload Error: {e}")
+        return None
 
 
 def upload_gofile(path):
+    print(f"Uploading to GoFile: {path}")
     try:
-        server = requests.get("https://api.gofile.io/servers").json()["data"][
-            "servers"
-        ][0]["name"]
+        server_req = requests.get("https://api.gofile.io/servers")
+        server = server_req.json()["data"]["servers"][0]["name"]
         r = requests.post(
-            f"https://{server}.gofile.io/uploadFile", files={"file": open(path, "rb")}
+            f"https://{server}.gofile.io/uploadFile",
+            files={"file": open(path, "rb")},
+            timeout=300,
         )
-        return r.json()["data"]["downloadPage"]
-    except:
-        return "Upload failed"
+        if r.status_code == 200:
+            return r.json()["data"]["downloadPage"]
+        return None
+    except Exception as e:
+        print(f"GoFile Upload Error: {e}")
+        return None
 
 
 # Main
 def main():
+    global BUILD_PROCESS
+
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--sync", action="store_true")
     parser.add_argument("-c", "--clean", action="store_true")
@@ -169,7 +202,7 @@ def main():
     # Sync
     if args.sync:
         start = time.time()
-        details = f"{line('ROM', ROM_NAME)}\n{line('Jobs', SYNC_JOBS)}"
+        details = f"{line('rom', ROM_NAME)}\n{line('jobs', SYNC_JOBS)}"
         msg_id = send_msg(format_msg("🟡", "Syncing sources...", details))
 
         cmd = f"repo sync -c -j{SYNC_JOBS} --optimized-fetch --prune --force-sync --no-clone-bundle --no-tags"
@@ -180,7 +213,7 @@ def main():
         edit_msg(
             msg_id,
             format_msg(
-                "🟢", "Sources synced!", f"{line('ROM', ROM_NAME)}", f"Took {dur}"
+                "🟢", "Sources synced!", f"{line('rom', ROM_NAME)}", f"Took {dur}"
             ),
         )
 
@@ -197,15 +230,15 @@ def main():
     REAL_VARIANT = build_vars.get("TYPE", BUILD_VARIANT)
 
     base_info = (
-        f"{line('ROM', ROM_NAME)}\n"
-        f"{line('Device', DEVICE)}\n"
-        f"{line('Android', ANDROID_VERSION)}\n"
-        f"{line('Build ID', BUILD_ID)}\n"
-        f"{line('Type', REAL_VARIANT)}"
+        f"{line('rom', ROM_NAME)}\n"
+        f"{line('device', DEVICE)}\n"
+        f"{line('android', ANDROID_VERSION)}\n"
+        f"{line('build id', BUILD_ID)}\n"
+        f"{line('build type', REAL_VARIANT)}"
     )
 
     initial_txt = (
-        f"{base_info}\n{line('Progress', 'Initializing...')}\n{line('Elapsed', '0s')}"
+        f"{base_info}\n{line('progress', 'Initializing...')}\n{line('elapsed', '0s')}"
     )
     msg_id = send_msg(format_msg("🟡", "Compiling ROM...", initial_txt))
 
@@ -215,7 +248,7 @@ def main():
     log_file = open("build.log", "w")
     start_time = time.time()
 
-    process = subprocess.Popen(
+    BUILD_PROCESS = subprocess.Popen(
         build_cmd,
         shell=True,
         executable="/bin/bash",
@@ -229,61 +262,61 @@ def main():
     last_update = 0
     ninja_started = False
 
-    # Build Loop
-    for log_line in process.stdout:
-        sys.stdout.write(log_line)
-        log_file.write(log_line)
+    try:
+        for log_line in BUILD_PROCESS.stdout:
+            sys.stdout.write(log_line)
+            log_file.write(log_line)
 
-        if "Starting ninja..." in log_line:
-            ninja_started = True
+            if "Starting ninja..." in log_line:
+                ninja_started = True
 
-        match = regex.search(log_line)
-        if match:
-            if not ninja_started:
-                continue
+            match = regex.search(log_line)
+            if match and ninja_started:
+                pct, cnt, time_left = match.groups()
+                now = time.time()
 
-            pct, cnt, time_left = match.groups()
+                # Update Telegram every 15 seconds to avoid rate limits
+                if now - last_update > 15:
+                    elapsed_str = str(timedelta(seconds=int(now - start_time)))
+                    progress_val = f"{pct} ({cnt})"
+                    if time_left:
+                        clean_time = time_left.replace(" remaining", "").strip()
+                        progress_val += f" remaining: {clean_time}"
 
-            now = time.time()
-            if now - last_update > 20:
-                elapsed_sec = int(now - start_time)
-                elapsed_str = str(timedelta(seconds=elapsed_sec))
+                    new_details = f"{base_info}\n{line('progress', progress_val)}\n{line('elapsed', elapsed_str)}"
+                    edit_msg(msg_id, format_msg("🟡", "Compiling ROM...", new_details))
+                    last_update = now
 
-                progress_val = f"{pct} ({cnt})"
-                if time_left:
-                    clean_time = time_left.replace(" remaining", "").strip()
-                    progress_val += f" remaining: {clean_time}"
+        return_code = BUILD_PROCESS.wait()
 
-                new_details = (
-                    f"{base_info}\n"
-                    f"{line('Progress', progress_val)}\n"
-                    f"{line('Elapsed', elapsed_str)}"
-                )
+    except Exception as e:
+        print(f"Build Loop Error: {e}")
+        return_code = 1
+    finally:
+        log_file.close()
 
-                edit_msg(msg_id, format_msg("🟡", "Compiling ROM...", new_details))
-                last_update = now
-
-    log_file.close()
-    return_code = process.wait()
     total_duration = str(timedelta(seconds=int(time.time() - start_time)))
 
-    # Post Build
+    # Failure Handling
     if return_code != 0:
         edit_msg(
             msg_id,
             format_msg("🔴", "Build Failed", "", f"Failed after {total_duration}"),
         )
-        send_doc(
-            "out/error.log" if os.path.exists("out/error.log") else "build.log",
-            ERROR_CHAT_ID,
-        )
+        err_log = "out/error.log" if os.path.exists("out/error.log") else "build.log"
+        send_doc(err_log, ERROR_CHAT_ID)
         sys.exit(1)
 
+    # Success & Upload
     out_dir = f"out/target/product/{DEVICE}"
     zips = glob.glob(f"{out_dir}/*{DEVICE}*.zip")
+
     if not zips:
         edit_msg(
-            msg_id, format_msg("🔴", "No ZIP found!", "", "Build finished but no file.")
+            msg_id,
+            format_msg(
+                "🔴", "No ZIP found!", "", "Build finished but no file generated."
+            ),
         )
         sys.exit(1)
 
@@ -293,35 +326,45 @@ def main():
     pd_link = upload_pd(final_zip)
     gf_link = upload_gofile(final_zip) if USE_GOFILE else None
 
-    size_str = f"{os.path.getsize(final_zip) / (1024 * 1024):.2f} MB"
+    # Final Stats
+    size_mb = os.path.getsize(final_zip) / (1024 * 1024)
+    size_str = f"{size_mb:.2f} MB"
     try:
-        md5 = subprocess.check_output(["md5sum", final_zip]).decode().split()[0]
+        md5 = subprocess.check_output(["md5sum", final_zip], text=True).split()[0]
     except:
         md5 = "N/A"
 
-    final_details = f"{base_info}\n" f"{line('Size', size_str)}\n" f"{line('MD5', md5)}"
+    final_details = f"{base_info}\n{line('size', size_str)}\n{line('md5', md5)}"
 
-    links = f"\n<b>PixelDrain:</b> <a href='{pd_link}'>Download</a>"
-    if gf_link:
-        links += f"\n<b>GoFile:</b> <a href='{gf_link}'>Download</a>"
+    links_html = ""
+    if pd_link:
+        links_html += f"\n<b>PixelDrain:</b> <a href='{pd_link}'>Download</a>"
+    else:
+        links_html += "\n<b>PixelDrain:</b> Upload Failed"
 
+    if USE_GOFILE:
+        if gf_link:
+            links_html += f"\n<b>GoFile:</b> <a href='{gf_link}'>Download</a>"
+        else:
+            links_html += "\n<b>GoFile:</b> Upload Failed"
+
+    # Optional JSON
     json_f = glob.glob(f"{out_dir}/*{DEVICE}*.json")
     if json_f:
-        links += f"\n<b>JSON:</b> <a href='{upload_pd(json_f[0])}'>Download</a>"
+        json_link = upload_pd(json_f[0])
+        if json_link:
+            links_html += f"\n<b>JSON:</b> <a href='{json_link}'>Download</a>"
 
     edit_msg(
         msg_id,
         format_msg(
             "🟢",
             "Build Complete!",
-            final_details + "\n" + links,
-            f"Build took {total_duration}",
+            final_details + "\n" + links_html,
+            f"Total time: {total_duration}",
         ),
     )
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nAborted.")
+    main()
