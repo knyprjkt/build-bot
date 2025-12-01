@@ -42,7 +42,7 @@ JOBS_FLAG = f"-j{jobs_env}" if jobs_env else (f"-j{cpu_cores}" if cpu_cores else
 SYNC_JOBS = jobs_env if jobs_env else (str(cpu_cores) if cpu_cores else "4")
 
 current_folder = os.getcwd().split("/")[-1]
-ROM_NAME = current_folder or "Unknown ROM"
+ROM_NAME = os.environ.get("CONFIG_ROM_NAME") or current_folder or "Unknown ROM"
 
 # Global process handle for graceful exit
 BUILD_PROCESS = None
