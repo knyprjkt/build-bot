@@ -234,15 +234,15 @@ def main():
     REAL_VARIANT = build_vars.get("TYPE", BUILD_VARIANT)
 
     base_info = (
-        f"<b>rom:</b> {ROM_NAME}\n"
-        f"<b>device:</b> {DEVICE}\n"
-        f"<b>android:</b> {ANDROID_VERSION}\n"
-        f"<b>build id:</b> {BUILD_ID}\n"
-        f"<b>build type:</b> {REAL_VARIANT}"
+        f"<b>rom:</b> <code>{ROM_NAME}</code>\n"
+        f"<b>device:</b> <code>{DEVICE}</code>\n"
+        f"<b>android:</b> <code>{ANDROID_VERSION}</code>\n"
+        f"<b>build id:</b> <code>{BUILD_ID}</code>\n"
+        f"<b>build type:</b> <code>{REAL_VARIANT}</code>"
     )
 
     # Starting message: Status -> Info
-    msg_id = send_msg(f"ℹ️ | Starting...\n\n{base_info}")
+    msg_id = send_msg(f"<b>ℹ️ | Starting...</b>\n\n{base_info}")
 
     build_cmd = f"source build/envsetup.sh && breakfast {DEVICE} {BUILD_VARIANT} && m {TARGET} {JOBS_FLAG}"
     print(f"Cmd: {build_cmd}")
@@ -290,7 +290,7 @@ def main():
 
                     edit_msg(
                         msg_id,
-                        f"🔄 | Building...\n"
+                        f"<b>🔄 | Building...</b>\n"
                         f"<b>progress:</b> <code>{prog_text}</code>\n"
                         f"{remaining_line}"
                         f"<b>elapsed:</b> <code>{elapsed_str}</code>\n\n"
@@ -312,7 +312,7 @@ def main():
     if return_code != 0:
         edit_msg(
             msg_id,
-            f"⚠️ | Build fail\n\nFailed after {total_duration}\n\n{base_info}",
+            f"<b>⚠️ | Build fail</b>\n\nFailed after {total_duration}\n\n{base_info}",
         )
         err_log = "out/error.log" if os.path.exists("out/error.log") else "build.log"
         send_doc(err_log, ERROR_CHAT_ID)
@@ -320,10 +320,12 @@ def main():
 
     # Build Success
     final_build_msg = (
-        f"✅ | Build Complete!\n" f"Build time: {total_duration}\n\n" f"{base_info}"
+        f"<b>✅ | Build Complete!</b>\n"
+        f"<b>Build time:</b> <code>{total_duration}</code>\n\n"
+        f"{base_info}"
     )
 
-    edit_msg(msg_id, f"{final_build_msg}\n\n🔄 | Uploading...")
+    edit_msg(msg_id, f"{final_build_msg}\n\n<b>🔄 | Uploading...</b>")
 
     # Upload Start
     out_dir = f"out/target/product/{DEVICE}"
@@ -331,7 +333,8 @@ def main():
 
     if not zips:
         edit_msg(
-            msg_id, f"{final_build_msg}\n\n⚠️ | Upload fail\n\nNo ZIP found after build."
+            msg_id,
+            f"{final_build_msg}\n\n<b>⚠️ | Upload fail</b>\n\nNo ZIP found after build.",
         )
         sys.exit(1)
 
@@ -369,11 +372,11 @@ def main():
     # Final Message
     final_combined_msg = (
         f"{final_build_msg}\n\n"
-        f"✅ | Upload completo\n"
-        f"Upload time: {upload_duration}\n\n"
-        f"file: {file_name}\n"
-        f"size: {size_str}\n"
-        f"md5: {md5}"
+        f"<b>✅ | Upload completo</b>\n"
+        f"<b>Upload time:</b> <code>{upload_duration}</code>\n\n"
+        f"<b>file:</b> <code>{file_name}</code>\n"
+        f"<b>size:</b> <code>{size_str}</code>\n"
+        f"<b>md5:</b> <code>{md5}</code>"
     )
 
     if pd_link or gf_link:
@@ -382,7 +385,8 @@ def main():
         )
     else:
         edit_msg(
-            msg_id, f"{final_build_msg}\n\n⚠️ | Upload fail\n\nCould not upload files."
+            msg_id,
+            f"{final_build_msg}\n\n<b>⚠️ | Upload fail</b>\n\nCould not upload files.",
         )
 
 
