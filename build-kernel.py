@@ -114,10 +114,18 @@ def get_compiled_version_string():
 
 def package_anykernel(version_string):
     print("Packaging AnyKernel3...")
-    if os.path.exists(ANYKERNEL_DIR):
-        shutil.rmtree(ANYKERNEL_DIR)
 
-    subprocess.call(["git", "clone", "-q", AK3_REPO, ANYKERNEL_DIR])
+    if os.path.exists(ANYKERNEL_DIR):
+        print("AnyKernel3 detected. Updating repository...")
+        subprocess.call(["git", "-C", ANYKERNEL_DIR, "pull", "-q"])
+
+        import glob
+
+        for old_zip in glob.glob(os.path.join(ANYKERNEL_DIR, "*.zip")):
+            os.remove(old_zip)
+    else:
+        print("Cloning AnyKernel3...")
+        subprocess.call(["git", "clone", "-q", AK3_REPO, ANYKERNEL_DIR])
 
     files_map = {"Image.gz": "Image.gz", "dtbo.img": "dtbo.img", "dtb.img": "dtb"}
 
@@ -133,6 +141,7 @@ def package_anykernel(version_string):
 
     cwd = os.getcwd()
     os.chdir(ANYKERNEL_DIR)
+
     zip_cmd = [
         "zip",
         "-r9",
