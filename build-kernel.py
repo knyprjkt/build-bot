@@ -4,41 +4,21 @@ import time
 import subprocess
 import shutil
 import argparse
-import requests
-import html
 import signal
-import json
-import base64
 import re
 from datetime import datetime
+import utils
 
-# Config
-if os.path.exists("config.env"):
-    with open("config.env", "r") as f:
-        for line_content in f:
-            if "=" in line_content and not line_content.strip().startswith("#"):
-                k, v = line_content.strip().split("=", 1)
-                os.environ[k] = v.strip('"').strip("'")
-
+# Configs
 BOT_TOKEN = os.environ.get("CONFIG_BOT_TOKEN")
 CHAT_ID = os.environ.get("CONFIG_CHATID")
-
-if not BOT_TOKEN or not CHAT_ID:
-    print("ERROR: CONFIG_BOT_TOKEN or CONFIG_CHATID missing.")
-    sys.exit(1)
-
 ERROR_CHAT_ID = os.environ.get("CONFIG_ERROR_CHATID", CHAT_ID)
-
-# Kernel Specific
 DEFCONFIG = os.environ.get("CONFIG_DEFCONFIG")
 AK3_REPO = os.environ.get("CONFIG_AK3_REPO")
-
-# Upload
-PD_API = os.environ.get("CONFIG_PDUP_API")
 USE_GOFILE = os.environ.get("CONFIG_GOFILE") == "true"
 
-if not DEFCONFIG:
-    print("ERROR: Missing kernel configuration (CONFIG_DEFCONFIG).")
+if not all([BOT_TOKEN, CHAT_ID, DEFCONFIG]):
+    print("ERROR: Missing configuration (BOT_TOKEN, CHATID, or DEFCONFIG).")
     sys.exit(1)
 
 cpu_cores = os.cpu_count()
@@ -46,12 +26,10 @@ jobs_env = os.environ.get("CONFIG_JOBS")
 JOBS_FLAG = f"-j{jobs_env}" if jobs_env else (f"-j{cpu_cores}" if cpu_cores else "-j4")
 DISPLAY_JOBS = jobs_env if jobs_env else (f"{cpu_cores} (All)" if cpu_cores else "4")
 
-# Directories
 KERNEL_OUT = "out/arch/arm64/boot"
 ANYKERNEL_DIR = "AnyKernel3"
 LOG_FILE = "build.log"
 
-# Global process handle
 BUILD_PROCESS = None
 
 
@@ -68,15 +46,6 @@ def signal_handler(sig, frame):
 
 
 signal.signal(signal.SIGINT, signal_handler)
-
-
-# Helpers
-def fmt_time(seconds):
-    seconds = int(seconds)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def get_git_head():
@@ -128,14 +97,12 @@ def get_compiler_version():
 
 
 def get_compiled_version_string():
-    # Extracts the full version from the kernel image.
     image_path = os.path.join(KERNEL_OUT, "Image")
     if not os.path.exists(image_path):
         return None
     try:
         cmd = f"strings {image_path} | grep 'Linux version [0-9]' | head -n 1"
         line_out = subprocess.check_output(cmd, shell=True, text=True).strip()
-
         match = re.search(r"Linux version (\S+)", line_out)
         if match:
             return match.group(1)
@@ -161,11 +128,8 @@ def package_anykernel(version_string):
             shutil.copy(src, dst)
 
     timestamp = datetime.now().strftime("%Y%a%b%d-%H%M%S")
-
-    # Use extracted string from binary (strings output) for accuracy
     ver_tag = version_string if version_string else "Unknown-Kernel"
-
-    zip_name = f"KSU-{ver_tag}-{timestamp}.zip"
+    zip_name = f"{ver_tag}-{timestamp}.zip"
 
     cwd = os.getcwd()
     os.chdir(ANYKERNEL_DIR)
@@ -189,144 +153,27 @@ def package_anykernel(version_string):
     return None
 
 
-def tg_req(method, data, files=None, retries=3):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-    for attempt in range(retries):
-        try:
-            r = requests.post(url, data=data, files=files, timeout=30)
-            if r.status_code == 200:
-                return r.json()
-            print(f"[Telegram Error {r.status_code}] {r.text}")
-        except Exception as e:
-            print(f"[Telegram Retry {attempt+1}/{retries}] {e}")
-            time.sleep(2)
-    return {}
-
-
-def send_msg(text, chat=CHAT_ID, buttons=None):
-    data = {
-        "chat_id": chat,
-        "text": text,
-        "parse_mode": "html",
-        "disable_web_page_preview": "true",
-    }
-    if buttons:
-        data["reply_markup"] = json.dumps({"inline_keyboard": buttons})
-    return tg_req("sendMessage", data).get("result", {}).get("message_id")
-
-
-def edit_msg(msg_id, text, chat=CHAT_ID, buttons=None):
-    if not msg_id:
-        return
-    data = {
-        "chat_id": chat,
-        "message_id": msg_id,
-        "text": text,
-        "parse_mode": "html",
-        "disable_web_page_preview": "true",
-    }
-    if buttons:
-        data["reply_markup"] = json.dumps({"inline_keyboard": buttons})
-    tg_req("editMessageText", data)
-
-
-def send_doc(file_path, chat=CHAT_ID):
-    if os.path.exists(file_path):
-        with open(file_path, "rb") as f:
-            tg_req(
-                "sendDocument",
-                {"chat_id": chat, "parse_mode": "html"},
-                files={"document": f},
-            )
-
-
-def line(label, value):
-    return f"<b>{label}:</b> <code>{html.escape(str(value))}</code>"
-
-
-def format_msg(icon, title, details, footer=""):
-    header = f"<b>{icon} | {title}</b>"
-    msg = f"{header}\n{details}"
-    if footer:
-        msg += f"\n\n<i>{html.escape(footer)}</i>"
-    return msg
-
-
-def upload_pd(path):
-    print(f"Uploading to PixelDrain: {path}")
-    if not PD_API:
-        print("PixelDrain API key missing.")
-        return None
-
-    file_name = os.path.basename(path)
-    url = f"https://pixeldrain.com/api/file/{file_name}"
-
-    auth_str = f":{PD_API}"
-    auth_bytes = auth_str.encode("ascii")
-    base64_auth = base64.b64encode(auth_bytes).decode("ascii")
-
-    headers = {"Authorization": f"Basic {base64_auth}"}
-
-    try:
-        with open(path, "rb") as f:
-            r = requests.put(url, data=f, headers=headers, timeout=300)
-
-        if r.status_code == 200:
-            return f"https://pixeldrain.com/u/{r.json().get('id')}"
-        elif r.status_code == 201:
-            return f"https://pixeldrain.com/u/{r.json().get('id')}"
-
-        print(f"[PixelDrain Error {r.status_code}] {r.text}")
-        return None
-    except Exception as e:
-        print(f"PixelDrain Upload Error: {e}")
-        return None
-
-
-def upload_gofile(path):
-    print(f"Uploading to GoFile: {path}")
-    try:
-        server_req = requests.get("https://api.gofile.io/servers")
-        server = server_req.json()["data"]["servers"][0]["name"]
-        r = requests.post(
-            f"https://{server}.gofile.io/uploadFile",
-            files={"file": open(path, "rb")},
-            timeout=300,
-        )
-        if r.status_code == 200:
-            return r.json()["data"]["downloadPage"]
-        return None
-    except Exception as e:
-        print(f"GoFile Upload Error: {e}")
-        return None
-
-
-# Main
 def main():
     global BUILD_PROCESS
-
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--clean", action="store_true")
     args = parser.parse_args()
 
-    if args.clean:
+    if args.clean and os.path.exists("out"):
         print("Cleaning out/...")
-        if os.path.exists("out"):
-            shutil.rmtree("out")
+        shutil.rmtree("out")
 
     git_head_link = get_git_head()
     compiler_ver = get_compiler_version()
 
-    head_line = f"<b>head:</b> <code>{git_head_link}</code>"
-
     base_info = (
-        f"{head_line}\n"
-        f"{line('defconfig', DEFCONFIG)}\n"
-        f"{line('jobs', DISPLAY_JOBS)}\n"
-        f"{line('compiler', compiler_ver)}"
+        f"<b>Head:</b> <code>{git_head_link}</code>\n"
+        f"{utils.line('Defconfig', DEFCONFIG)}\n"
+        f"{utils.line('Jobs', DISPLAY_JOBS)}\n"
+        f"{utils.line('Compiler', compiler_ver)}"
     )
 
-    msg_id = send_msg(format_msg("ℹ️", "Starting...", base_info))
+    msg_id = utils.send_msg(utils.MESSAGES["build_start"].format(base_info=base_info))
 
     print(f"Configuring: {DEFCONFIG}")
     subprocess.call(
@@ -335,12 +182,13 @@ def main():
 
     local_ver = get_localversion()
 
+    # Update info with local version
     base_info = (
-        f"{head_line}\n"
-        f"{line('local version', local_ver)}\n"
-        f"{line('defconfig', DEFCONFIG)}\n"
-        f"{line('jobs', DISPLAY_JOBS)}\n"
-        f"{line('compiler', compiler_ver)}"
+        f"<b>Head:</b> <code>{git_head_link}</code>\n"
+        f"{utils.line('Local Version', local_ver)}\n"
+        f"{utils.line('Defconfig', DEFCONFIG)}\n"
+        f"{utils.line('Jobs', DISPLAY_JOBS)}\n"
+        f"{utils.line('Compiler', compiler_ver)}"
     )
 
     build_cmd = f"make {JOBS_FLAG} O=out ARCH=arm64 LLVM=1 Image.gz dtbo.img dtb.img"
@@ -373,20 +221,17 @@ def main():
             log_file.write(line_out)
 
             now = time.time()
-            if now - last_update > 10:
-                elapsed = fmt_time(now - start_time)
+            if now - last_update > 15:
+                elapsed = utils.fmt_time(now - start_time)
 
-                status_details = f"{line('elapsed', elapsed)}\n\n" f"{base_info}"
+                stats_str = f"<b>Elapsed:</b> <code>{elapsed}</code>"
 
-                edit_msg(
+                utils.edit_msg(
                     msg_id,
-                    format_msg(
-                        "🔄", "Building...", status_details, "Check logs for output"
+                    utils.MESSAGES["build_progress"].format(
+                        stats=stats_str, base_info=base_info
                     ),
                 )
-
-                sys.stdout.write(f"\r[Building] {elapsed}...")
-                sys.stdout.flush()
                 last_update = now
 
         return_code = BUILD_PROCESS.poll()
@@ -398,36 +243,47 @@ def main():
         return_code = 1
     finally:
         log_file.close()
-        sys.stdout.write("\n")
 
-    total_duration = fmt_time(time.time() - start_time)
+    total_duration = utils.fmt_time(time.time() - start_time)
 
+    # Failure
     if return_code != 0:
-        fail_details = f"{line('duration', total_duration)}\n\n{base_info}"
-        edit_msg(msg_id, format_msg("⚠️", "Build Failed", fail_details))
-        send_doc(LOG_FILE, ERROR_CHAT_ID)
+        utils.edit_msg(
+            msg_id,
+            utils.MESSAGES["build_fail"].format(
+                time=total_duration, base_info=base_info
+            ),
+        )
+        utils.send_doc(LOG_FILE, ERROR_CHAT_ID)
         sys.exit(1)
 
-    transition_msg = (
-        f"<b>✅ | Build Complete</b>\n"
-        f"{base_info}\n\n"
-        f"<b>☁️ | Packaging & Uploading...</b>"
+    # Success
+    final_build_msg = utils.MESSAGES["build_success"].format(
+        time=total_duration, base_info=base_info
     )
-    edit_msg(msg_id, transition_msg)
+    utils.edit_msg(
+        msg_id, utils.MESSAGES["uploading"].format(build_msg=final_build_msg)
+    )
 
+    # Package
     compiled_ver_str = get_compiled_version_string()
-
     final_zip = package_anykernel(compiled_ver_str)
 
     if not final_zip:
-        edit_msg(msg_id, format_msg("⚠️", "Packaging Failed", "Could not create ZIP."))
+        utils.edit_msg(
+            msg_id,
+            utils.MESSAGES["upload_fail"].format(
+                build_msg=final_build_msg, reason="Could not create ZIP."
+            ),
+        )
         sys.exit(1)
 
+    # Upload
     file_name = os.path.basename(final_zip)
     upload_start = time.time()
-    pd_link = upload_pd(final_zip)
-    gf_link = upload_gofile(final_zip) if USE_GOFILE else None
-    upload_duration = fmt_time(time.time() - upload_start)
+    pd_link = utils.upload_pd(final_zip)
+    gf_link = utils.upload_gofile(final_zip) if USE_GOFILE else None
+    upload_duration = utils.fmt_time(time.time() - upload_start)
 
     size_mb = os.path.getsize(final_zip) / (1024 * 1024)
     size_str = f"{size_mb:.2f} MB"
@@ -436,33 +292,31 @@ def main():
     except:
         md5 = "N/A"
 
-    final_combined_msg = (
-        f"<b>✅ | Build Complete</b>\n"
-        f"{head_line}\n"
-        f"{line('local version', local_ver)}\n"
-        f"{line('defconfig', DEFCONFIG)}\n"
-        f"{line('jobs', DISPLAY_JOBS)}\n"
-        f"{line('compiler', compiler_ver)}\n\n"
-        f"<b>✅ | Upload Complete</b>\n"
-        f"{line('build time', total_duration)}\n"
-        f"{line('upload time', upload_duration)}\n\n"
-        f"{line('file', file_name)}\n"
-        f"{line('size', size_str)}\n"
-        f"{line('md5', md5)}"
-    )
-
     buttons_list = []
     if pd_link:
         buttons_list.append({"text": "PixelDrain", "url": pd_link})
     if USE_GOFILE and gf_link:
         buttons_list.append({"text": "GoFile", "url": gf_link})
 
-    if buttons_list:
-        edit_msg(msg_id, final_combined_msg, buttons=[buttons_list])
+    if pd_link or gf_link:
+        utils.edit_msg(
+            msg_id,
+            utils.MESSAGES["final_msg"].format(
+                build_msg=final_build_msg,
+                up_time=upload_duration,
+                filename=file_name,
+                size=size_str,
+                md5=md5,
+            ),
+            buttons=[buttons_list] if buttons_list else None,
+        )
     else:
-        edit_msg(msg_id, final_combined_msg)
-
-    print("=== Finished ===")
+        utils.edit_msg(
+            msg_id,
+            utils.MESSAGES["upload_fail"].format(
+                build_msg=final_build_msg, reason="Could not upload files."
+            ),
+        )
 
 
 if __name__ == "__main__":
