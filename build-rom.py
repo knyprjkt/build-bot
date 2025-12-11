@@ -63,6 +63,36 @@ def signal_handler(sig, frame):
 
 signal.signal(signal.SIGINT, signal_handler)
 
+# Strings
+MESSAGES = {
+    "sync_start": "<b>ℹ️ | Starting Synchronization...</b>\n{details}",
+    "sync_done": "<b>✅ | Synchronization Complete!</b>\n{details}\n<b>Time:</b> {dur}",
+    "build_start": "<b>ℹ️ | Starting Build...</b>\n\n{base_info}",
+    "build_progress": (
+        "<b>🔄 | Building...</b>\n"
+        "<b>Progress:</b> <code>{prog_text}</code>\n"
+        "{remaining_line}"
+        "<b>Elapsed:</b> <code>{elapsed}</code>\n\n"
+        "{base_info}"
+    ),
+    "build_fail": "<b>⚠️ | Build Failed</b>\n\nFailed after {time}\n\n{base_info}",
+    "build_success": (
+        "<b>✅ | Build Complete!</b>\n"
+        "<b>Build Time:</b> <code>{time}</code>\n\n"
+        "{base_info}"
+    ),
+    "uploading": "{build_msg}\n\n<b>🔄 | Uploading Files...</b>",
+    "upload_fail": "{build_msg}\n\n<b>⚠️ | Upload Failed</b>\n\n{reason}",
+    "final_msg": (
+        "{build_msg}\n\n"
+        "<b>✅ | Upload Complete</b>\n"
+        "<b>Upload Time:</b> <code>{up_time}</code>\n\n"
+        "<b>File:</b> <code>{filename}</code>\n"
+        "<b>Size:</b> <code>{size}</code>\n"
+        "<b>MD5:</b> <code>{md5}</code>"
+    ),
+}
+
 
 # Helpers
 def fmt_time(seconds):
@@ -152,14 +182,6 @@ def line(label, value):
     return f"<b>{label}:</b> <code>{html.escape(str(value))}</code>"
 
 
-def format_msg(icon, title, details, footer=""):
-    header = f"<b>{icon} | {title}</b>"
-    msg = f"{header}\n{details}"
-    if footer:
-        msg += f"\n\n<i>{html.escape(footer)}</i>"
-    return msg
-
-
 def upload_pd(path):
     print(f"Uploading to PixelDrain: {path}")
     if not PD_API:
@@ -222,7 +244,7 @@ def main():
     if args.sync:
         start = time.time()
         details = f"{line('rom', ROM_NAME)}\n{line('jobs', SYNC_JOBS)}"
-        msg_id = send_msg(format_msg("ℹ️", "Starting...", details))
+        msg_id = send_msg(MESSAGES["sync_start"].format(details=details))
 
         cmd = f"repo sync -c -j{SYNC_JOBS} --optimized-fetch --prune --force-sync --no-clone-bundle --no-tags"
         if subprocess.call(cmd.split()) != 0:
@@ -230,10 +252,7 @@ def main():
 
         dur = fmt_time(time.time() - start)
         edit_msg(
-            msg_id,
-            format_msg(
-                "✅", "Sync Complete!", f"{line('rom', ROM_NAME)}", f"Took {dur}"
-            ),
+            msg_id, MESSAGES["sync_done"].format(details=line("rom", ROM_NAME), dur=dur)
         )
 
     # Clean
@@ -257,7 +276,7 @@ def main():
     )
 
     # Starting message: Status -> Info
-    msg_id = send_msg(f"<b>ℹ️ | Starting...</b>\n\n{base_info}")
+    msg_id = send_msg(MESSAGES["build_start"].format(base_info=base_info))
 
     build_cmd = f"source build/envsetup.sh && breakfast {DEVICE} {BUILD_VARIANT} && m {TARGET} {JOBS_FLAG}"
     print(f"Cmd: {build_cmd}")
@@ -298,22 +317,21 @@ def main():
 
                 if now - last_update > 15:
                     elapsed_str = fmt_time(now - start_time)
-
                     prog_text = f"{pct} ({cnt})"
+
                     remaining_line = ""
                     if time_left:
                         clean_time = time_left.replace(" remaining", "").strip()
-                        remaining_line = (
-                            f"<b>remaining:</b> <code>{clean_time}</code>\n"
-                        )
+                        remaining_line = f"<b>restante:</b> <code>{clean_time}</code>\n"
 
                     edit_msg(
                         msg_id,
-                        f"<b>🔄 | Building...</b>\n"
-                        f"<b>progress:</b> <code>{prog_text}</code>\n"
-                        f"{remaining_line}"
-                        f"<b>elapsed:</b> <code>{elapsed_str}</code>\n\n"
-                        f"{base_info}",
+                        MESSAGES["build_progress"].format(
+                            prog_text=prog_text,
+                            remaining_line=remaining_line,
+                            elapsed=elapsed_str,
+                            base_info=base_info,
+                        ),
                     )
                     last_update = now
 
@@ -331,20 +349,17 @@ def main():
     if return_code != 0:
         edit_msg(
             msg_id,
-            f"<b>⚠️ | Build fail</b>\n\nFailed after {total_duration}\n\n{base_info}",
+            MESSAGES["build_fail"].format(time=total_duration, base_info=base_info),
         )
         err_log = "out/error.log" if os.path.exists("out/error.log") else "build.log"
         send_doc(err_log, ERROR_CHAT_ID)
         sys.exit(1)
 
     # Build Success
-    final_build_msg = (
-        f"<b>✅ | Build Complete!</b>\n"
-        f"<b>Build time:</b> <code>{total_duration}</code>\n\n"
-        f"{base_info}"
+    final_build_msg = MESSAGES["build_success"].format(
+        time=total_duration, base_info=base_info
     )
-
-    edit_msg(msg_id, f"{final_build_msg}\n\n<b>🔄 | Uploading...</b>")
+    edit_msg(msg_id, MESSAGES["uploading"].format(build_msg=final_build_msg))
 
     # Upload Start
     out_dir = f"out/target/product/{DEVICE}"
@@ -360,7 +375,9 @@ def main():
     if not final_zip:
         edit_msg(
             msg_id,
-            f"{final_build_msg}\n\n<b>⚠️ | Upload fail</b>\n\nNo ZIP found after build.",
+            MESSAGES["upload_fail"].format(
+                build_msg=final_build_msg, reason="Nenhum ZIP encontrado."
+            ),
         )
         sys.exit(1)
 
@@ -394,23 +411,24 @@ def main():
     file_name = os.path.basename(final_zip)
 
     # Final Message
-    final_combined_msg = (
-        f"{final_build_msg}\n\n"
-        f"<b>✅ | Upload completo</b>\n"
-        f"<b>Upload time:</b> <code>{upload_duration}</code>\n\n"
-        f"<b>file:</b> <code>{file_name}</code>\n"
-        f"<b>size:</b> <code>{size_str}</code>\n"
-        f"<b>md5:</b> <code>{md5}</code>"
-    )
-
     if pd_link or gf_link:
         edit_msg(
-            msg_id, final_combined_msg, buttons=[buttons_list] if buttons_list else None
+            msg_id,
+            MESSAGES["final_msg"].format(
+                build_msg=final_build_msg,
+                up_time=upload_duration,
+                filename=file_name,
+                size=size_str,
+                md5=md5,
+            ),
+            buttons=[buttons_list] if buttons_list else None,
         )
     else:
         edit_msg(
             msg_id,
-            f"{final_build_msg}\n\n<b>⚠️ | Upload fail</b>\n\nCould not upload files.",
+            MESSAGES["upload_fail"].format(
+                build_msg=final_build_msg, reason="Não foi possível enviar arquivos."
+            ),
         )
 
 
