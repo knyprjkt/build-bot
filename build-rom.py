@@ -193,7 +193,7 @@ def main():
         msg_id, utils.MESSAGES["uploading"].format(build_msg=final_build_msg)
     )
 
-    # Upload artifacts
+    # Locate/Prepare artifacts
     # Locate the rom package
     out_dir = f"out/target/product/{DEVICE}"
     final_zip = None
@@ -232,18 +232,36 @@ def main():
             if os.path.exists(rec_name):
                 rec_zip_path = rec_name
 
-    # Upload ROM
+    # Upload files
     upload_start = time.time()
-    pd_link = utils.upload_pd(final_zip)
-    gf_link = utils.upload_gofile(final_zip) if USE_GOFILE else None
 
-    # Upload Recovery
-    rec_pd_link = None
-    rec_gf_link = None
+    files_to_upload = [("Download", final_zip)]
     if rec_zip_path:
-        rec_pd_link = utils.upload_pd(rec_zip_path)
+        files_to_upload.append(("Recovery", rec_zip_path))
+
+    json_f = glob.glob(f"{out_dir}/*{DEVICE}*.json")
+    if json_f:
+        files_to_upload.append(("JSON", json_f[0]))
+
+    buttons_list = []
+    main_file_uploaded = False
+
+    for label, file_path in files_to_upload:
+        if not file_path or not os.path.exists(file_path):
+            continue
+
+        pd_link = utils.upload_pd(file_path)
+        if pd_link:
+            buttons_list.append({"text": f"{label} (PD)", "url": pd_link})
+            if file_path == final_zip:
+                main_file_uploaded = True
+
         if USE_GOFILE:
-            rec_gf_link = utils.upload_gofile(rec_zip_path)
+            gf_link = utils.upload_gofile(file_path)
+            if gf_link:
+                buttons_list.append({"text": f"{label} (GF)", "url": gf_link})
+                if file_path == final_zip:
+                    main_file_uploaded = True
 
     upload_duration = utils.fmt_time(time.time() - upload_start)
 
@@ -254,29 +272,9 @@ def main():
     except:
         md5 = "N/A"
 
-    buttons_list = []
-
-    # Rom
-    if pd_link:
-        buttons_list.append({"text": "Download (PD)", "url": pd_link})
-    if USE_GOFILE and gf_link:
-        buttons_list.append({"text": "Download (GF)", "url": gf_link})
-
-    # Recovery
-    if rec_pd_link:
-        buttons_list.append({"text": "Recovery (PD)", "url": rec_pd_link})
-    if rec_gf_link:
-        buttons_list.append({"text": "Recovery (GF)", "url": rec_gf_link})
-
-    json_f = glob.glob(f"{out_dir}/*{DEVICE}*.json")
-    if json_f:
-        json_link = utils.upload_pd(json_f[0])
-        if json_link:
-            buttons_list.append({"text": "JSON", "url": json_link})
-
     file_name = os.path.basename(final_zip)
 
-    if pd_link or gf_link:
+    if main_file_uploaded:
         utils.edit_msg(
             msg_id,
             utils.MESSAGES["final_msg"].format(

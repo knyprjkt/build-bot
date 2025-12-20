@@ -71,32 +71,31 @@ def tg_req(method, data, files=None, retries=3):
     return {}
 
 
-def send_msg(text, chat_id=CHAT_ID, buttons=None):
-    if not chat_id:
-        return None
+def _get_tg_payload(chat_id, text, buttons=None, msg_id=None):
     data = {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "html",
         "disable_web_page_preview": "true",
     }
+    if msg_id:
+        data["message_id"] = msg_id
     if buttons:
         data["reply_markup"] = json.dumps({"inline_keyboard": buttons})
+    return data
+
+
+def send_msg(text, chat_id=CHAT_ID, buttons=None):
+    if not chat_id:
+        return None
+    data = _get_tg_payload(chat_id, text, buttons)
     return tg_req("sendMessage", data).get("result", {}).get("message_id")
 
 
 def edit_msg(msg_id, text, chat_id=CHAT_ID, buttons=None):
     if not msg_id or not chat_id:
         return
-    data = {
-        "chat_id": chat_id,
-        "message_id": msg_id,
-        "text": text,
-        "parse_mode": "html",
-        "disable_web_page_preview": "true",
-    }
-    if buttons:
-        data["reply_markup"] = json.dumps({"inline_keyboard": buttons})
+    data = _get_tg_payload(chat_id, text, buttons, msg_id)
     tg_req("editMessageText", data)
 
 
